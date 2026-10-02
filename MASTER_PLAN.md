@@ -209,3 +209,64 @@ DashCam is an android application that enables our personal phone to use as a da
        motion-heavy clip (the first thing to degrade is fine detail during fast motion — sign text and
        number plates). Lowering the target further is possible but trades visible sharpness, so 2.5 Mbps
        is the recommended setting; revisit only with feedback that quality is unacceptable.
+
+7. [x] Phone go to sleep while recording
+   - Problem: If the phone kept idle during recoding, the phone goto sleep mode. This stops the ongoing recording activity. Note that it may not happen while USB debugging
+   - **Root cause found: the app stops itself, it is not an Android/CameraX failure.** When the display
+     times out, Flutter gets `AppLifecycleState.paused`, and `didChangeAppLifecycleState` calls
+     `_closeCamera()` (`lib/capture_screen.dart`), which *deliberately* closes out a running recording
+     (`stopVideoRecording()` then `_store.save(...)`, `lib/capture_screen.dart:128-131`). So the file is
+     always saved correctly and is never corrupted — the recording just ends early and silently. The
+     screen timeout is therefore the trigger, and preventing the timeout is the fix.
+   - Why it never showed up over USB: `settings get global stay_on_while_plugged_in` is `15` on the real
+     phone, which keeps the display alive whenever it is charging. Confirmed the user's suspicion.
+   - Fix: hold `FLAG_KEEP_SCREEN_ON` on the activity window while recording, so the display never times
+     out and `paused` is never delivered. Deliberately implemented natively rather than with the
+     `wakelock` package, to avoid adding a dependency — this project has already been broken once by a
+     transitive dependency bumping `compileSdk` (see the `permission_handler` note in AGENTS.md).
+     - `android/app/src/main/kotlin/com/example/dashcam/MainActivity.kt`: new `dashcam/screen` channel
+       with `setKeepScreenOn(bool)`, toggling
+       `WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON` via `runOnUiThread`.
+     - `lib/screen_awake.dart`: `ScreenAwake.set(bool)`, mirroring the `StorageLocationStore` channel
+       pattern. Swallows `PlatformException`/`MissingPluginException` on purpose — if the call fails the
+       screen may dim during a long recording, which is not worth interrupting the user over, and
+       recording must continue either way.
+     - `lib/capture_screen.dart`: held only while recording, at four call sites — enabled after
+       `startVideoRecording()` succeeds, released in `_stop()` *before* the save `await` so the screen is
+       free to dim while the file is written, released in `_closeCamera()` (the path a timeout takes, so
+       the lock cannot outlive the recording), and released in `dispose()` as a safety net so the display
+       can never be left held awake.
+   - **Verified on the emulator (item 7 is a window flag, so the emulator's unrepresentative camera is
+     irrelevant here — this is a valid place to verify it).** Arms a 15 s `screen_off_timeout` and watches
+     `mHoldScreenWindow` plus the window's `fl=` flags:
+     - Idle: `mHoldScreenWindow=null`, flags have no `KEEP_SCREEN_ON`.
+     - Recording: `mHoldScreenWindow=Window{... dashcam/.MainActivity}`, flags contain `KEEP_SCREEN_ON`.
+     - **28 s after arming a 15 s timeout mid-recording: `mWakefulness=Awake` and the status still read
+       `Recording 00:40`.** The recording survived well past the timeout.
+     - Control, to prove the timeout was genuinely armed and it was the flag doing the work: after Stop,
+       the flag cleared (`mHoldScreenWindow=null`, no `KEEP_SCREEN_ON`) and with the same 15 s timeout the
+       screen went `mWakefulness=Asleep` after 25 s idle.
+   - Known limitation, accepted rather than worked around: this does **not** survive the user pressing
+     the power button. A manual lock pauses the app for real and `_closeCamera()` ends the recording —
+     which is the intended behaviour. Surviving a manual lock needs a foreground service with a
+     persistent notification, which is a substantially larger change and is out of scope for this item.
+   - **Verified on the physical phone as well (device `ZLM7AU4PMNOFUOUW`), and this is the run that
+     matters.** By this point `stay_on_while_plugged_in` had been changed to `0`, so the phone was no
+     longer masking the bug through charging — the exact condition that reproduces it — with the
+     device's own 15 s `screen_off_timeout`. In landscape:
+     - Recording: `mHoldScreenWindow=Window{... dashcam/.MainActivity}` and `KEEP_SCREEN_ON` present.
+     - **After 30 s of waiting against a 15 s timeout: `mWakefulness=Awake`, status still
+       `Recording 00:53`** (the recording had run ~43 s). The recording survived well past the timeout.
+     - Control, after Stop: `mHoldScreenWindow=null` and `KEEP_SCREEN_ON` cleared; with the same 15 s
+       timeout and `stay_on_while_plugged_in=0` the phone went `mWakefulness=Asleep` within 25 s idle.
+       So the timeout was genuinely armed and the flag is the only thing holding the display.
+     - The resulting clip is valid and at the reduced bitrate:
+       `dashcam_20261001_082834.mp4`, 22,982,480 B over 60.147 s = **3.06 Mbps**, `moov` present, `mdat`
+       to EOF, `1280x720` @ `30.01` fps, `avc1 High L3.1`. Item 6 and item 7 confirmed working together.
+     - `stay_on_while_plugged_in` was left at the user's own value of `0`; it was only pinned to `1`
+       temporarily to survive the post-test state check, then restored.
+   - Not verified: a cosmetic post-test UI dump of the Capture screen (status text / saved label). The
+     phone's notification shade was stuck expanded on top of the app and would not collapse via `cmd
+     statusbar collapse`, `input keyevent 4`, `input keyevent 3` (HOME) or `wm dismiss-keyguard`; it needs
+     a physical tap. This does not affect the item 7 result, which rests on `dumpsys power`,
+     `dumpsys window` and the saved file, all of which were read successfully.

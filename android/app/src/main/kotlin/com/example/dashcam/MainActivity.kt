@@ -7,6 +7,7 @@ import android.provider.DocumentsContract
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import android.view.WindowManager
 import java.io.File
 
 /**
@@ -22,6 +23,7 @@ class MainActivity : FlutterActivity() {
 
     private companion object {
         const val CHANNEL = "dashcam/storage"
+        const val SCREEN_CHANNEL = "dashcam/screen"
         const val REQUEST_TREE = 4711
         const val MIME_MP4 = "video/mp4"
     }
@@ -45,6 +47,36 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, SCREEN_CHANNEL)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "setKeepScreenOn" ->
+                        setKeepScreenOn(call.argument<Boolean>("enabled"), result)
+                    else -> result.notImplemented()
+                }
+            }
+    }
+
+    /**
+     * Plan item 7. Holding FLAG_KEEP_SCREEN_ON stops the display from timing out,
+     * which is what otherwise pauses the Flutter app and ends a recording that the
+     * user has not stopped. It is scoped to this window, so Android drops the flag
+     * by itself once the activity is no longer visible.
+     */
+    private fun setKeepScreenOn(enabled: Boolean?, result: MethodChannel.Result) {
+        if (enabled == null) {
+            result.error("bad_arguments", "enabled must be a boolean", null)
+            return
+        }
+        runOnUiThread {
+            if (enabled) {
+                window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            } else {
+                window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            }
+            result.success(null)
+        }
     }
 
     private fun chooseFolder(result: MethodChannel.Result) {

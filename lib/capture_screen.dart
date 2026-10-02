@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import 'app_drawer.dart';
+import 'screen_awake.dart';
 import 'storage_location.dart';
 import 'video_store.dart';
 
@@ -50,6 +51,8 @@ class _CaptureScreenState extends State<CaptureScreen>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _ticker?.cancel();
+    // Safety net: never leave the display held awake after the screen is gone.
+    unawaited(ScreenAwake.set(false));
     unawaited(_controller?.dispose());
     super.dispose();
   }
@@ -120,6 +123,9 @@ class _CaptureScreenState extends State<CaptureScreen>
 
   Future<void> _closeCamera() async {
     _ticker?.cancel();
+    // Plan item 7: this is the path a screen timeout takes, so the wake lock has
+    // to be released here or it would outlive the recording it was held for.
+    unawaited(ScreenAwake.set(false));
     final controller = _controller;
     _controller = null;
     if (controller == null) return;
@@ -157,9 +163,13 @@ class _CaptureScreenState extends State<CaptureScreen>
 
     try {
       await controller.startVideoRecording();
+      // Plan item 7: hold the screen awake now that a recording is genuinely
+      // running, otherwise the display times out and the app pauses itself.
+      unawaited(ScreenAwake.set(true));
     } on CameraException catch (e) {
       _ticker?.cancel();
       setState(() => _phase = _Phase.idle);
+      unawaited(ScreenAwake.set(false));
       _notify(_describe(e));
     }
   }
@@ -170,6 +180,9 @@ class _CaptureScreenState extends State<CaptureScreen>
 
     _ticker?.cancel();
     setState(() => _phase = _Phase.idle);
+    // Released before the await below so the screen is free to dim while the
+    // file is being written, rather than staying lit for the whole save.
+    unawaited(ScreenAwake.set(false));
 
     try {
       final recording = await controller.stopVideoRecording();
